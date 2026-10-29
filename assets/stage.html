@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code Animation Stage</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  #fit { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; background: #000; }
+  #hud {
+    position: fixed; left: 12px; bottom: 10px; z-index: 9;
+    font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace;
+    color: rgba(255,255,255,.55); background: rgba(0,0,0,.45);
+    padding: 4px 8px; border-radius: 4px; pointer-events: none; display: none;
+  }
+</style>
+</head>
+<body>
+<div id="fit"><canvas id="stage" width="1920" height="1080"></canvas></div>
+<div id="hud"></div>
+
+<script>
+'use strict';
+
+/* ============================================================================
+ * STAGE — 确定性 Canvas 舞台
+ * 规则：画面只由 drawScene(ctx, t) 决定；不得使用 Math.random / Date.now /
+ * 上一帧状态。所有随机用 seeded(seed)。渲染器通过 window.__setTime(t) 逐帧取图。
+ * ==========================================================================*/
+
+const Q = new URLSearchParams(location.search);
+const CFG = {
+  width:  Number(Q.get('w')) || 1920,
+  height: Number(Q.get('h')) || 1080,
+  duration: Number(Q.get('d')) || 8,   // 秒
+  fps: Number(Q.get('fps')) || 24,
+  background: '#000',
+  loop: true,
+};
+
+const canvas = document.getElementById('stage');
+const ctx = canvas.getContext('2d', { alpha: false });
+canvas.width = CFG.width;
+canvas.height = CFG.height;
+
+/* ---------- 基础数学 ---------- */
+const TAU = Math.PI * 2;
+const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const inv = (a, b, x) => clamp((x - a) / (b - a), 0, 1);
+const smooth = (a, b, x) => { const t = inv(a, b, x); return t * t * (3 - 2 * t); };
+const easeOut = t => 1 - Math.pow(1 - clamp(t, 0, 1), 3);
+const easeIn = t => Math.pow(clamp(t, 0, 1), 3);
+const easeInOut = t => { t = clamp(t, 0, 1); return t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; };
+const easeOutBack = t => { t = clamp(t, 0, 1); const c = 1.70158; return 1 + (c + 1) * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2); };
+
+/* ---------- 确定性随机 ---------- */
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* ---------- 颜色 ---------- */
+function hexA(hex, a = 1) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+}
+function mixHex(h1, h2, t) {
+  const p = h => { const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+  const a = p(h1), b = p(h2), c = i => Math.round(lerp(a[i], b[i], clamp(t, 0, 1)));
+  return `rgb(${c(0)},${c(1)},${c(2)})`;
+}
+
+/* ---------- 画布工具 ---------- */
+function offscreen(w, h, dpr = 1) {
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(w * dpr));
+  c.height = Math.max(1, Math.round(h * dpr));
+  const x = c.getContext('2d');
+  x.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return [c, x];
+}
+
+/* 文字：手动字距，避免浏览器差异；返回总宽 */
+function trackedText(ctx, text, x, y, spacing = 0, align = 'left') {
+  const chars = [...text];
+  const w = chars.map(ch => ctx.measureText(ch).width);
+  const total = w.reduce((s, v) => s + v, 0) + spacing * Math.max(0, chars.length - 1);
+  let cx = align === 'center' ? x - total / 2 : align === 'right' ? x - total : x;
+  for (let i = 0; i < chars.length; i++) {
+    ctx.fillText(chars[i], cx, y);
+    cx += w[i] + spacing;
+  }
+  return total;
+}
+
+/* 中英混排折行；maxWidth 内按字/词断行 */
+function wrapText(ctx, text, x, y, maxWidth, lineHeight, align = 'left') {
+  const tokens = text.match(/[A-Za-z0-9@#%&'’\-.]+|\s+|[\s\S]/gu) || [];
+  const lines = [];
+  let line = '';
+  for (const tk of tokens) {
+    const test = line + tk;
+    if (ctx.measureText(test.replace(/\s+$/, '')).width > maxWidth && line.trim()) {
+      lines.push(line.replace(/\s+$/, ''));
+      line = tk.trimStart();
+    } else {
+      line = test;
+    }
+  }
+  if (line.trim()) lines.push(line.replace(/\s+$/, ''));
+  lines.forEach((ln, i) => {
+    const lx = align === 'center' ? x : align === 'right' ? x : x;
+    ctx.textAlign = align;
+    ctx.fillText(ln, lx, y + i * lineHeight);
+    ctx.textAlign = 'left';
+  });
+  return lines.length;
+}
+
+/* 纸纹 / 颗粒：种子固定，画一次缓存，逐帧只贴图 */
+const texCache = new Map();
+function grain(ctx, w, h, amount = 0.06, seed = 7, scale = 1) {
+  const key = `g${w}x${h}_${amount}_${seed}`;
+  let tex = texCache.get(key);
+  if (!tex) {
+    const [c, x] = offscreen(w, h, scale);
+    const r = mulberry32(seed);
+    const img = x.createImageData(c.width, c.height);
+    for (let i = 0; i < img.data.length; i += 4) {
+      const v = r() < .5 ? 0 : 255;
+      img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+      img.data[i + 3] = Math.round(r() * 255 * amount);
+    }
+    x.putImageData(img, 0, 0);
+    tex = c;
+    texCache.set(key, tex);
+  }
+  ctx.drawImage(tex, 0, 0, w, h);
+}
+
+function vignette(ctx, w, h, strength = .5, tint = '0,0,0') {
+  const g = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * .25, w / 2, h / 2, Math.hypot(w, h) * .62);
+  g.addColorStop(0, `rgba(${tint},0)`);
+  g.addColorStop(1, `rgba(${tint},${strength})`);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, w, h);
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+}
+
+/* ============================================================================
+ * SCENE — 只改这一段。drawScene(ctx, t) 必须是 t 的纯函数。
+ * ==========================================================================*/
+
+const PALETTE = { ink: '#141414', paper: '#F2E9D2', accent: '#F6C23E' };
+
+function drawScene(ctx, t) {
+  const W = CFG.width, H = CFG.height;
+
+  // 背景
+  ctx.fillStyle = PALETTE.paper;
+  ctx.fillRect(0, 0, W, H);
+  grain(ctx, W, H, 0.10, 20261029, 1);
+
+  // 上下安全线（示例）
+  const m = W * 0.05;
+  const appear = smooth(0, .5, t);
+  ctx.strokeStyle = hexA(PALETTE.ink, .18 * appear);
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(m, H * .12); ctx.lineTo(W - m, H * .12);
+  ctx.moveTo(m, H * .88); ctx.lineTo(W - m, H * .88);
+  ctx.stroke();
+
+  // 标题：字距收紧 + 上浮淡入
+  const p = smooth(.25, 1.4, t);
+  ctx.save();
+  ctx.fillStyle = PALETTE.ink;
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = `700 ${Math.round(H * .17)}px Georgia, "Times New Roman", "Songti SC", "SimSun", serif`;
+  const spacing = lerp(H * .02, -H * .004, easeOut(p));
+  const y = lerp(H * .54 + H * .03, H * .54, easeOut(p));
+  ctx.globalAlpha = p;
+  trackedText(ctx, 'CODE', m, y, spacing, 'left');
+  ctx.font = `italic 400 ${Math.round(H * .17)}px Georgia, "Times New Roman", "Songti SC", "SimSun", serif`;
+  trackedText(ctx, 'Animation', m, y + H * .19, spacing, 'left');
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  // 一个会呼吸的强调色圆点（示例元素）
+  const breathe = .5 + .5 * Math.sin(t * 1.6);
+  ctx.fillStyle = PALETTE.accent;
+  ctx.beginPath();
+  ctx.arc(W - m - H * .06, H * .54 - H * .06, H * .06 * (.9 + .1 * breathe), 0, TAU);
+  ctx.fill();
+
+  // 右下角小字
+  ctx.globalAlpha = smooth(1.2, 1.8, t) * .6;
+  ctx.fillStyle = PALETTE.ink;
+  ctx.font = `500 ${Math.round(H * .022)}px "IBM Plex Mono", Consolas, monospace`;
+  ctx.textAlign = 'right';
+  ctx.fillText('STAGE / 1920×1080', W - m, H * .84);
+  ctx.textAlign = 'left';
+  ctx.globalAlpha = 1;
+
+  // 结尾淡出（循环前）
+  const out = smooth(CFG.duration - .45, CFG.duration, t);
+  if (out > 0) {
+    ctx.fillStyle = hexA(PALETTE.paper, out);
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+/* ============================================================================
+ * 播放器 / 渲染接口 — 一般不用改
+ * ==========================================================================*/
+
+const state = { t: 0, playing: true, frozen: Q.has('t') ? Number(Q.get('t')) || 0 : null, last: 0, dirty: true };
+
+function drawAt(t) {
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+  drawScene(ctx, clamp(t, 0, CFG.duration));
+  ctx.restore();
+  if (Q.get('debug') === '1') {
+    const hud = document.getElementById('hud');
+    hud.style.display = 'block';
+    hud.textContent = `t=${t.toFixed(2)}s  ${CFG.width}×${CFG.height}  ${CFG.fps}fps`;
+  }
+}
+
+function resize() {
+  const s = Math.min(innerWidth / CFG.width, innerHeight / CFG.height);
+  canvas.style.width = Math.round(CFG.width * s) + 'px';
+  canvas.style.height = Math.round(CFG.height * s) + 'px';
+}
+addEventListener('resize', resize);
+resize();
+
+function tick(now) {
+  if (!state.last) state.last = now;
+  const dt = Math.min((now - state.last) / 1000, .05);
+  state.last = now;
+  if (state.frozen === null && state.playing) {
+    state.t += dt;
+    if (state.t >= CFG.duration) state.t = CFG.loop ? state.t % CFG.duration : CFG.duration;
+  }
+  drawAt(state.frozen === null ? state.t : state.frozen);
+  requestAnimationFrame(tick);
+}
+
+addEventListener('keydown', e => {
+  if (e.code === 'Space') {
+    e.preventDefault();
+    state.playing = !state.playing;
+  }
+});
+
+/* 渲染器接口 */
+window.__setTime = (t) => { state.frozen = Number(t); drawAt(state.frozen); return true; };
+window.__resume = () => { state.frozen = null; return true; };
+window.__stage = { CFG, drawAt };
+
+/* 字体就绪后置位，渲染器会等这个标志 */
+if (document.fonts && document.fonts.ready) {
+  document.fonts.ready
+    .then(() => { window.__stageReady = true; })
+    .catch(() => { window.__stageReady = true; });
+} else {
+  window.__stageReady = true;
+}
+
+drawAt(state.frozen === null ? 0 : state.frozen);
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

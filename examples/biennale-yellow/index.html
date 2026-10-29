@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Biennale Yellow — Code Animation Studio</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  #fit { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; background: #000; }
+</style>
+</head>
+<body>
+<div id="fit"><canvas id="stage" width="1920" height="1080"></canvas></div>
+<script>
+'use strict';
+
+/* ============================================================
+ * Biennale Yellow — 参考实现（H1）
+ * 8 秒循环 / 1920×1080 / 24fps / 纯 Canvas 2D / 零外部资源
+ * 规格来源：library/H_现成版式/H1_Biennale Yellow.md
+ * ============================================================ */
+
+const CFG = { width: 1920, height: 1080, duration: 8, fps: 24 };
+const canvas = document.getElementById('stage');
+const ctx = canvas.getContext('2d', { alpha: false });
+canvas.width = CFG.width;
+canvas.height = CFG.height;
+
+const TAU = Math.PI * 2;
+const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const easeOut = t => 1 - Math.pow(1 - clamp(t, 0, 1), 3);
+const easeInOut = t => { t = clamp(t, 0, 1); return t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; };
+const seg = (a, b, t) => clamp((t - a) / (b - a), 0, 1);
+
+const C = {
+  paper: '#F2E9D2',
+  ink: '#1D2A68',
+  sun: '#F6C23E',
+  fleckA: '#8C7A55',
+  fleckB: '#FFFAF0',
+};
+
+const SERIF = 'Georgia, "Times New Roman", "Noto Serif SC", "Songti SC", SimSun, serif';
+
+/* 纸纹：5000 个 1–3px 方点，缓存一次 */
+let paperTex = null;
+function makePaper() {
+  const c = document.createElement('canvas');
+  c.width = CFG.width; c.height = CFG.height;
+  const x = c.getContext('2d');
+  x.fillStyle = C.paper;
+  x.fillRect(0, 0, CFG.width, CFG.height);
+  let a = 20261029 >>> 0;
+  const r = () => {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  for (let i = 0; i < 5000; i++) {
+    const s = 1 + Math.floor(r() * 3);
+    x.fillStyle = r() < .5 ? C.fleckA : C.fleckB;
+    x.globalAlpha = 0.045 + r() * 0.05;
+    x.fillRect(r() * CFG.width, r() * CFG.height, s, s);
+  }
+  x.globalAlpha = 1;
+  return c;
+}
+
+/* 手动字距 */
+function trackedText(ctx, text, x, y, spacing, align = 'left') {
+  const chars = [...text];
+  const ws = chars.map(ch => ctx.measureText(ch).width);
+  const total = ws.reduce((s, v) => s + v, 0) + spacing * Math.max(0, chars.length - 1);
+  let cx = align === 'center' ? x - total / 2 : align === 'right' ? x - total : x;
+  for (let i = 0; i < chars.length; i++) { ctx.fillText(chars[i], cx, y); cx += ws[i] + spacing; }
+  return total;
+}
+
+function frameLines(ctx, p, alpha) {
+  const L = 64, T = 64, R = 1856, B = 1016; // 外框 64,64,1792,952
+  const midX = (L + R) / 2, midY = (T + B) / 2;
+  // 起点留 1.2%：第 1 帧就有四个小角标，不是一张空纸
+  const k = 0.012 + 0.988 * easeInOut(p);
+  ctx.strokeStyle = `rgba(29,42,104,${alpha})`;
+  ctx.lineWidth = 1.8;
+  ctx.lineCap = 'butt';
+  const draw = (x1, y1, x2, y2) => { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); };
+
+  // 四边：从四角向中点生长
+  draw(L, T, L + (midX - L) * k, T);
+  draw(R, T, R - (R - midX) * k, T);
+  draw(L, B, L + (midX - L) * k, B);
+  draw(R, B, R - (R - midX) * k, B);
+  draw(L, T, L, T + (midY - T) * k);
+  draw(L, B, L, B - (B - midY) * k);
+  draw(R, T, R, T + (midY - T) * k);
+  draw(R, B, R, B - (B - midY) * k);
+
+  // 两道横线：左右同时向中间画
+  const k2 = 0.012 + 0.988 * easeInOut(seg(0.1, 0.85, p));
+  for (const y of [148, 932]) {
+    draw(L, y, L + (R - L) / 2 * k2, y);
+    draw(R, y, R - (R - L) / 2 * k2, y);
+  }
+}
+
+function sun(ctx, t, p) {
+  const cx = 1380, cy = 470 + (1 - p) * 300;
+  const a = p;
+
+  // 光晕（缓慢呼吸，幅度 0.6%，避免中段完全静止）
+  ctx.save();
+  ctx.globalAlpha = a;
+  const hr = 560 * (1 + 0.006 * Math.sin(t * 0.9));
+  const g = ctx.createRadialGradient(cx, cy, 20, cx, cy, hr);
+  g.addColorStop(0, 'rgba(246,194,62,1)');
+  g.addColorStop(0.38, 'rgba(246,194,62,0.92)');
+  g.addColorStop(0.70, 'rgba(246,214,120,0.35)');
+  g.addColorStop(1, 'rgba(246,214,120,0)');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(cx, cy, hr, 0, TAU); ctx.fill();
+  ctx.restore();
+
+  // 实心圆（半径 ±1px 呼吸）
+  ctx.save();
+  ctx.globalAlpha = a;
+  ctx.fillStyle = C.sun;
+  ctx.beginPath(); ctx.arc(cx, cy, 250 * (1 + 0.003 * Math.sin(t * 0.7)), 0, TAU); ctx.fill();
+  ctx.restore();
+
+  // 三道同心细圈
+  ctx.save();
+  ctx.globalAlpha = a;
+  ctx.strokeStyle = C.ink;
+  ctx.lineWidth = 1.6;
+  [[250, .9], [330, .45], [410, .45]].forEach(([r, al]) => {
+    ctx.globalAlpha = a * al;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU); ctx.stroke();
+  });
+  ctx.restore();
+
+  // 刻度环：120 条，每 5 条加长；1°/s
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(t * Math.PI / 180);
+  ctx.strokeStyle = C.ink;
+  ctx.globalAlpha = a * 0.85;
+  ctx.lineWidth = 1.6;
+  for (let i = 0; i < 120; i++) {
+    const ang = i / 120 * TAU;
+    const long = i % 5 === 0;
+    const r1 = 410, r2 = long ? 432 : 421;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(ang) * r1, Math.sin(ang) * r1);
+    ctx.lineTo(Math.cos(ang) * r2, Math.sin(ang) * r2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawScene(ctx, t) {
+  const W = CFG.width, H = CFG.height;
+
+  ctx.fillStyle = C.paper;
+  ctx.fillRect(0, 0, W, H);
+  if (!paperTex) paperTex = makePaper();
+  ctx.drawImage(paperTex, 0, 0);
+
+  // 0–0.8 外框
+  frameLines(ctx, seg(0.0, 0.8, t), 1);
+
+  // 0.4–1.8 太阳
+  sun(ctx, t, easeOut(seg(0.35, 1.9, t)));
+
+  // 1.0–2.4 标题
+  const tp = easeOut(seg(0.9, 2.4, t));
+  if (tp > 0) {
+    const spacing = lerp(20, -4, tp);
+    const dy = (1 - tp) * 24;
+    ctx.save();
+    ctx.globalAlpha = tp;
+    ctx.fillStyle = C.ink;
+    ctx.textBaseline = 'alphabetic';
+    ctx.font = `700 214px ${SERIF}`;
+    const w1 = trackedText(ctx, 'STYLE', 100, 560 + dy, spacing, 'left');
+    ctx.font = `italic 400 214px ${SERIF}`;
+    const w2 = trackedText(ctx, 'Atlas', 100, 770 + dy, spacing, 'left');
+    ctx.restore();
+    // 防止标题压到刻度环（规格要求右端 < 948）
+    if (Math.max(w1, w2) + 100 > 948 && !drawScene.warned) {
+      drawScene.warned = true;
+      console.warn('标题可能压到刻度环：', 100 + Math.max(w1, w2));
+    }
+  }
+
+  // 2.0–2.8 页眉页脚
+  const hp = seg(1.9, 2.7, t);
+  if (hp > 0) {
+    ctx.save();
+    ctx.globalAlpha = hp;
+    ctx.fillStyle = C.ink;
+    ctx.textBaseline = 'alphabetic';
+
+    ctx.font = `400 26px ${SERIF}`;
+    ctx.globalAlpha = hp * 0.9;
+    trackedText(ctx, 'THE 341 · CODE ANIMATION SERIES', 104, 118, 6, 'left');
+    trackedText(ctx, 'N° 01', 1650, 118, 6, 'left');
+
+    ctx.globalAlpha = hp * 0.85;
+    ctx.font = `400 34px ${SERIF}`;
+    ctx.fillText('三百四十一种风格，一条生产线', 104, 980);
+    ctx.textAlign = 'right';
+    ctx.fillText('2026 · STUDIO', 1816, 980);
+    ctx.textAlign = 'left';
+    ctx.restore();
+  }
+
+  // 4.0–4.8 一行小注 + 一条细线：给中段一个第二拍，填补下半部空白
+  const cp = easeOut(seg(4.0, 4.8, t));
+  if (cp > 0) {
+    ctx.save();
+    ctx.strokeStyle = C.ink;
+    ctx.globalAlpha = cp * 0.55;
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(100, 846);
+    ctx.lineTo(100 + 240 * cp, 846);
+    ctx.stroke();
+
+    ctx.globalAlpha = cp * 0.8;
+    ctx.fillStyle = C.ink;
+    ctx.font = `400 26px ${SERIF}`;
+    trackedText(ctx, 'MOTION SYSTEM · 341 PROMPTS · 12 STACKS', 100, 896 + (1 - cp) * 8, 5, 'left');
+    ctx.restore();
+  }
+
+  // 7.5–8.0 淡出到纸色
+  const out = seg(7.4, 8.0, t);
+  if (out > 0) {
+    ctx.fillStyle = `rgba(242,233,210,${easeInOut(out)})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+/* ============================================================
+ * 播放器（渲染器接口）— 不要改
+ * ============================================================ */
+
+const state = { t: 0, playing: true, frozen: null, last: 0 };
+
+function drawAt(t) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  drawScene(ctx, clamp(t, 0, CFG.duration));
+}
+
+function resize() {
+  const s = Math.min(innerWidth / CFG.width, innerHeight / CFG.height);
+  canvas.style.width = Math.round(CFG.width * s) + 'px';
+  canvas.style.height = Math.round(CFG.height * s) + 'px';
+}
+addEventListener('resize', resize); resize();
+
+function tick(now) {
+  if (!state.last) state.last = now;
+  const dt = Math.min((now - state.last) / 1000, .05);
+  state.last = now;
+  if (state.frozen !== null) {
+    drawAt(state.frozen);
+    requestAnimationFrame(tick);
+    return;
+  }
+  if (state.playing) {
+    state.t += dt;
+    if (state.t >= CFG.duration) state.t %= CFG.duration;
+  }
+  drawAt(state.t);
+  requestAnimationFrame(tick);
+}
+
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); state.playing = !state.playing; }
+});
+
+const Q = new URLSearchParams(location.search);
+if (Q.has('t')) { state.frozen = Number(Q.get('t')) || 0; drawAt(state.frozen); }
+else { requestAnimationFrame(tick); }
+
+window.__setTime = t => { state.frozen = Number(t); drawAt(state.frozen); return true; };
+window.__resume = () => { state.frozen = null; state.last = 0; return true; };
+window.__stage = { CFG, drawAt };
+
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { window.__stageReady = true; });
+else window.__stageReady = true;
+if (Q.has('t')) window.__stageReady = true;
+</script>
+</body>
+</html>

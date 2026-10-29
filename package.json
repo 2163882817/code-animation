@@ -1,0 +1,16 @@
+{
+  "name": "code-animation-studio",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Agent Skill for planning and rendering deterministic HTML/Canvas animation",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=22.15.0" },
+  "scripts": {
+    "check": "node scripts/check.mjs examples/biennale-yellow/index.html",
+    "doctor": "node scripts/doctor.mjs",
+    "test": "node --test tests/cli.test.mjs",
+    "release:check": "node scripts/release.mjs --check",
+    "release:prepare": "node scripts/release.mjs"
+  }
+}

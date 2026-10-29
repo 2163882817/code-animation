@@ -1,0 +1,34 @@
+# Local creations and generated releases
+/projects/
+/out/
+/dist/
+**/.frames/
+**/.frames-*/
+**/.silent.mp4
+**/.render-silent.mp4
+
+# Unverified optional reference materials stay local
+/library/**
+!/library/README.md
+
+# Dependencies and caches
+node_modules/
+.voice-runtime/
+.runtime/
+.venv/
+__pycache__/
+*.pyc
+*.log
+*.zip
+*.tgz
+
+# Credentials and machine preferences
+.env
+.env.*
+!.env.example
+.codex/
+.cursor/
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
